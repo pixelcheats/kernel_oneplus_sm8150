@@ -1,0 +1,94 @@
+name: Build Kernel
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout kernel source
+      uses: actions/checkout@v4
+      with:
+        ref: bka
+        fetch-depth: 1
+
+    - name: Setup build environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y git ccache automake flex lzop bison \
+        gperf build-essential zip curl zlib1g-dev g++-multilib \
+        libxml2-utils bzip2 libbz2-dev squashfs-tools pngcrush \
+        schedtool dpkg-dev liblz4-tool make optipng libssl-dev \
+        bc libc6-dev-i386 libx11-dev xsltproc unzip \
+        device-tree-compiler python3 libelf-dev
+
+    - name: Clone toolchain
+      run: |
+        mkdir -p $HOME/toolchains
+        git clone --depth=1 https://github.com/kdrag0n/proton-clang $HOME/toolchains/clang
+
+    - name: Clone AnyKernel3
+      run: |
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3 $HOME/AnyKernel3
+
+    - name: Remove KernelSU if present
+      run: |
+        rm -rf KernelSU drivers/kernelsu 2>/dev/null || true
+        sed -i 's/CONFIG_KERNELSU=y/# CONFIG_KERNELSU is not set/g' arch/arm64/configs/vendor/* 2>/dev/null || true
+        sed -i 's/CONFIG_KSU=y/# CONFIG_KSU is not set/g' arch/arm64/configs/vendor/* 2>/dev/null || true
+
+    - name: Disable LTO
+      run: |
+        sed -i 's/CONFIG_LTO_CLANG=y/# CONFIG_LTO_CLANG is not set/g' arch/arm64/configs/vendor/* 2>/dev/null || true
+        sed -i 's/CONFIG_LTO_CLANG_THIN=y/# CONFIG_LTO_CLANG_THIN is not set/g' arch/arm64/configs/vendor/* 2>/dev/null || true
+        sed -i 's/CONFIG_CFI_CLANG=y/# CONFIG_CFI_CLANG is not set/g' arch/arm64/configs/vendor/* 2>/dev/null || true
+
+    - name: Build kernel
+      run: |
+        export PATH="$HOME/toolchains/clang/bin:$PATH"
+        export ARCH=arm64
+        export SUBARCH=arm64
+        
+        # Find defconfig
+        DEFCONFIG=$(ls arch/arm64/configs/vendor/*sm8150*_defconfig 2>/dev/null | head -1)
+        if [ -z "$DEFCONFIG" ]; then
+          DEFCONFIG=$(ls arch/arm64/configs/vendor/*perf*_defconfig 2>/dev/null | head -1)
+        fi
+        
+        echo "Using defconfig: $DEFCONFIG"
+        make O=out $(basename $DEFCONFIG)
+        
+        make O=out -j$(nproc) \
+          CC=clang \
+          CLANG_TRIPLE=aarch64-linux-gnu- \
+          CROSS_COMPILE=aarch64-linux-gnu- \
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi- \
+          2>&1 | tee build.log
+
+    - name: Package with AnyKernel3
+      run: |
+        cp out/arch/arm64/boot/Image.gz $HOME/AnyKernel3/ 2>/dev/null || \
+        cp out/arch/arm64/boot/Image $HOME/AnyKernel3/
+        
+        cd $HOME/AnyKernel3
+        sed -i 's/kernel.string=.*/kernel.string=Clean Kernel for KernelPatch/g' anykernel.sh
+        sed -i 's/device.name1=.*/device.name1=guacamoleb/g' anykernel.sh
+        sed -i 's/device.name2=.*/device.name2=guacamole/g' anykernel.sh
+        sed -i 's/do.devicecheck=.*/do.devicecheck=0/g' anykernel.sh
+        
+        zip -r9 kernel_clean_noKSU.zip * -x .git README.md
+
+    - name: Upload kernel zip
+      uses: actions/upload-artifact@v4
+      with:
+        name: kernel_clean_noKSU
+        path: /home/runner/AnyKernel3/kernel_clean_noKSU.zip
+
+    - name: Upload build log
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: build_log
+        path: build.log
